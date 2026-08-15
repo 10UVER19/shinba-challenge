@@ -36,7 +36,9 @@ RACE_ID_PATTERN = re.compile(r"^\d{12}$")
 WEB_APP_RETURN_PARAMETER = "pythonistaResult"
 RETURN_TO_SAFARI_ENABLED = True
 NEWCOMER_LIST_ACTION = "collectNewcomerList"
+SELECTED_RACES_ACTION = "collectSelectedRaces"
 MEMO_SYNC_ACTION = "syncHorseMemos"
+MEMO_SYNC_ACTION_ALIASES = {MEMO_SYNC_ACTION, "syncHorseMemo"}
 WEB_APP_ID = "shinba-challenge"
 LEGACY_WEB_APP_IDS = {WEB_APP_ID, "shinba-challenge-v2"}
 PRODUCTION_WEB_APP_ORIGIN = "https://10uver19.github.io"
@@ -148,8 +150,27 @@ def _normalize_payload(raw_text: str) -> Dict[str, Any]:
         races.append(normalized)
     races.sort(key=lambda race: (race["raceTime"], race["raceId"]))
     return {
+        "action": SELECTED_RACES_ACTION,
         "date": date,
         "selectedRaces": races,
+        "returnUrl": _normalize_return_url(
+            payload.get("returnUrl"), payload.get("appId"), payload.get("returnOrigin")
+        ),
+    }
+
+
+def _normalize_newcomer_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    date = str(payload.get("date") or "").strip()
+    if not DATE_PATTERN.fullmatch(date):
+        raise InputError("INVALID_DATE", "dateはYYYY-MM-DD形式で指定してください。")
+    if "selectedRaces" in payload:
+        raise InputError(
+            "INVALID_NEWCOMER_REQUEST",
+            "collectNewcomerListではselectedRacesを指定しないでください。",
+        )
+    return {
+        "action": NEWCOMER_LIST_ACTION,
+        "date": date,
         "returnUrl": _normalize_return_url(
             payload.get("returnUrl"), payload.get("appId"), payload.get("returnOrigin")
         ),
@@ -297,6 +318,8 @@ def _return_to_web_app(return_url: str) -> bool:
 
 def main() -> None:
     return_url = PRODUCTION_WEB_APP_URL
+    action = ""
+    request_date = ""
     try:
         raw_text = _load_text_from_shortcuts()
         try:
@@ -306,30 +329,40 @@ def main() -> None:
         if not isinstance(request_source, dict):
             raise InputError("INVALID_PAYLOAD", "JSONオブジェクトを指定してください。")
         action = _requested_action(raw_text)
+        request_date = str(request_source.get("date") or "").strip()
         return_url = _normalize_return_url(
             request_source.get("returnUrl"),
             request_source.get("appId"),
             request_source.get("returnOrigin"),
         )
         if action == NEWCOMER_LIST_ACTION:
-            output = collect_newcomer_list_with_webview()
-        elif action == MEMO_SYNC_ACTION:
+            payload = _normalize_newcomer_payload(request_source)
+            return_url = payload["returnUrl"]
+            output = collect_newcomer_list_with_webview(payload["date"])
+        elif action in MEMO_SYNC_ACTION_ALIASES:
             payload = _normalize_memo_payload(request_source)
             return_url = payload["returnUrl"]
             output = sync_horse_memos_with_webview(payload)
-        else:
+        elif action in {"", SELECTED_RACES_ACTION}:
             payload = _normalize_payload(raw_text)
             return_url = payload["returnUrl"]
             output = collect_races(payload)
+        else:
+            raise InputError("UNSUPPORTED_ACTION", "actionを確認してください。")
     except Exception as error:
-        output = {"success": False, "error": _structured_error(error)}
+        output = {
+            "success": False,
+            "action": action or None,
+            "date": request_date or None,
+            "error": _structured_error(error),
+        }
     output_json = json.dumps(output, ensure_ascii=False, separators=(",", ":"))
     if clipboard is not None:
         try:
             clipboard.set(output_json)
         except Exception:
             pass
-    # Webアプリへの貼り付け用として、標準出力はJSON 1件だけにする。
+    # 完成JSONはクリップボードへ保存し、同じJSONを進捗ログの末尾にも出力する。
     print(output_json)
     # 出力やクリップボード処理の成否にかかわらず、安全な許可済みURLへの復帰を試みる。
     _return_to_web_app(return_url)

@@ -431,18 +431,29 @@ class RaceCollectorDelegate:
         return True
 
     def webview_did_start_load(self, webview: Any) -> None:
-        self.controller.handle_load_started()
+        self.controller.dispatch_callback("LOAD_STARTED", self.controller.handle_load_started)
 
     def webview_did_finish_load(self, webview: Any) -> None:
-        self.controller.handle_load_finished()
+        self.controller.dispatch_callback("LOAD_FINISHED", self.controller.handle_load_finished)
 
     def webview_did_fail_load(
         self, webview: Any, error_code: int, error_message: str
     ) -> None:
-        self.controller.handle_load_failed(error_code)
+        self.controller.dispatch_callback(
+            "LOAD_FAILED", lambda: self.controller.handle_load_failed(error_code)
+        )
 
 
 class WebViewRaceCollector:
+    CHECK_AUTH = "CHECK_AUTH"
+    WAIT_LOGIN = "WAIT_LOGIN"
+    LOAD_RACE = "LOAD_RACE"
+    WAIT_DOM = "WAIT_DOM"
+    EXTRACT = "EXTRACT"
+    SAVE_RESULT = "SAVE_RESULT"
+    NEXT_RACE = "NEXT_RACE"
+    COMPLETE = "COMPLETE"
+
     def __init__(self, payload: Dict[str, Any]) -> None:
         if ui is None:
             raise WebViewClientError("WEBVIEW_UNAVAILABLE", "Pythonistaのui.WebViewを利用できません。")
@@ -452,10 +463,14 @@ class WebViewRaceCollector:
         self.errors: List[Dict[str, Any]] = []
         self.current_index = 0
         self.done = False
-        self.mode = "checking_auth"
+        self.mode = self.CHECK_AUTH
         self.auth_poll_scheduled = False
-        self.race_poll_token = 0
+        self.inspect_scheduled = False
+        self.transition_pending = False
+        self.race_token = 0
+        self.page_inspect_attempt = 0
         self.race_poll_attempt = 0
+        self.dom_ready_logged = False
         self.last_dom_result: Optional[Dict[str, Any]] = None
         self.view = RaceCollectorView(self)
         self.webview = self.view.webview
@@ -466,10 +481,51 @@ class WebViewRaceCollector:
             return self.selected[self.current_index]
         return None
 
+    def _progress_prefix(self) -> str:
+        return f"[{min(self.current_index + 1, len(self.selected))}/{len(self.selected)}]"
+
+    def log_event(self, event: str) -> None:
+        print(f"{self._progress_prefix()} {event}")
+
+    def _handle_unexpected(self, stage: str, error: Exception) -> None:
+        if self.done:
+            return
+        self.log_event(f"ERROR {stage}_{type(error).__name__}")
+        if self.current_race is not None and self.mode in {
+            self.LOAD_RACE, self.WAIT_DOM, self.EXTRACT, self.SAVE_RESULT
+        }:
+            self.fail_current("UNEXPECTED_RACE_ERROR", f"{stage}中に予期しないエラーが発生しました。")
+        else:
+            self.finish_with_remaining_error(
+                "WEBVIEW_STATE_ERROR", "WebViewの状態処理中に予期しないエラーが発生しました。"
+            )
+
+    def dispatch_callback(self, stage: str, callback: Any) -> None:
+        if self.done:
+            return
+        try:
+            callback()
+        except Exception as error:
+            self._handle_unexpected(stage, error)
+
+    def _schedule(self, stage: str, callback: Any, delay: float, token: Optional[int] = None) -> None:
+        def guarded() -> None:
+            if self.done or (token is not None and token != self.race_token):
+                return
+            try:
+                callback()
+            except Exception as error:
+                self._handle_unexpected(stage, error)
+
+        ui.delay(guarded, delay)
+
     def run(self) -> Dict[str, Any]:
         self.view.progress_label.text = "認証状態を確認しています…"
         self.view.present("full_screen", orientations=["portrait"])
-        self.webview.load_url(AUTH_CHECK_URL)
+        try:
+            self.webview.load_url(AUTH_CHECK_URL)
+        except Exception:
+            self.finish_with_remaining_error("AUTH_PAGE_LOAD_FAILED", "認証確認ページを開けませんでした。")
         self.view.wait_modal()
         return self.build_output()
 
@@ -490,60 +546,77 @@ class WebViewRaceCollector:
         if self.done:
             return
         race = self.current_race
-        if race and self.mode == "loading_race":
-            self.set_progress(
-                f"{self.current_index + 1} / {len(self.selected)} {race['raceName']}"
-            )
+        if race and self.mode == self.LOAD_RACE:
+            self.set_progress(f"{self.current_index + 1} / {len(self.selected)} {race['raceName']}")
 
     def handle_load_finished(self) -> None:
-        if not self.done:
-            ui.delay(self.inspect_current_page, 0.15)
+        if self.done or self.mode in {self.NEXT_RACE, self.COMPLETE}:
+            return
+        self.schedule_page_inspection(0.2)
 
     def handle_load_failed(self, error_code: int) -> None:
         if self.done or int(error_code) == -999:
             return
-        if self.mode in {"loading_race", "polling_race"} and self.current_race:
-            self.fail_current("WEBVIEW_LOAD_FAILED", "出馬表ページの読み込みに失敗しました。")
-        else:
-            self.mode = "waiting_login"
-            self.set_retry_visible(True)
-            self.set_progress("認証ページを読み込めません。再確認してください。")
-
-    def inspect_current_page(self) -> None:
-        if self.done:
+        if self.mode in {self.LOAD_RACE, self.WAIT_DOM}:
+            # 古いnavigationの失敗通知で次レースを誤って進めない。DOMタイムアウト側で判定する。
+            self.log_event("LOAD_EVENT_ERROR")
+            self.schedule_page_inspection(0.35)
             return
-        try:
-            info = self.evaluate_json(AUTH_STATE_JS)
-            if not info:
-                self.mode = "waiting_login"
-                self.set_retry_visible(True)
-                self.set_progress("ページ状態を確認できません。再確認してください。")
-                return
-            current = self.current_race
+        self.mode = self.WAIT_LOGIN
+        self.set_retry_visible(True)
+        self.set_progress("認証ページを読み込めません。再確認してください。")
+        self.schedule_auth_poll()
+
+    def schedule_page_inspection(self, delay: float) -> None:
+        if self.done or self.inspect_scheduled or self.mode not in {
+            self.CHECK_AUTH, self.WAIT_LOGIN, self.LOAD_RACE, self.WAIT_DOM
+        }:
+            return
+        self.inspect_scheduled = True
+        token = self.race_token
+
+        def inspect() -> None:
+            self.inspect_scheduled = False
+            self.inspect_current_page(token)
+
+        self._schedule("PAGE_INSPECT", inspect, delay, token)
+
+    def inspect_current_page(self, token: Optional[int] = None) -> None:
+        if self.done or (token is not None and token != self.race_token):
+            return
+        info = self.evaluate_json(AUTH_STATE_JS)
+        if self.mode in {self.LOAD_RACE, self.WAIT_DOM}:
+            self.page_inspect_attempt += 1
+            race = self.current_race
             if (
-                current
+                info and race
                 and info.get("host") in {"race.sp.netkeiba.com", "race.netkeiba.com"}
-                and info.get("raceId") == current["raceId"]
+                and info.get("raceId") == race["raceId"]
             ):
                 self.start_race_polling()
                 return
-            self.handle_auth_state(str(info.get("authState") or "unknown"))
-        except Exception:
-            self.finish_with_remaining_error(
-                "WEBVIEW_STATE_ERROR", "WebViewのページ状態を確認できませんでした。"
-            )
+            if self.page_inspect_attempt >= MAX_RACE_POLL_ATTEMPTS:
+                self.fail_current("RACE_PAGE_NOT_READY", "対象出馬表への遷移を確認できませんでした。")
+            else:
+                self.schedule_page_inspection(RACE_POLL_INTERVAL)
+            return
+
+        if not info:
+            self.mode = self.WAIT_LOGIN
+            self.set_retry_visible(True)
+            self.set_progress("ページ状態を確認できません。再確認してください。")
+            self.schedule_auth_poll()
+            return
+        self.handle_auth_state(str(info.get("authState") or "unknown"))
 
     def handle_auth_state(self, auth_state: str) -> None:
         if self.done:
             return
         if auth_state == "authenticated":
-            if self.mode in {"loading_race", "polling_race"}:
-                return
             self.set_retry_visible(False)
             self.load_current_race()
             return
-
-        self.mode = "waiting_login"
+        self.mode = self.WAIT_LOGIN
         self.set_retry_visible(True)
         if auth_state == "login_required":
             self.view.title_label.text = "netkeibaへログインしてください"
@@ -560,22 +633,18 @@ class WebViewRaceCollector:
 
         def poll() -> None:
             self.auth_poll_scheduled = False
-            if self.done or self.mode != "waiting_login":
+            if self.done or self.mode != self.WAIT_LOGIN:
                 return
-            self.inspect_current_page()
-            if not self.done and self.mode == "waiting_login":
+            self.inspect_current_page(self.race_token)
+            if not self.done and self.mode == self.WAIT_LOGIN:
                 self.schedule_auth_poll()
 
-        ui.delay(poll, 1.0)
+        self._schedule("AUTH_POLL", poll, 1.0, self.race_token)
 
     def retry_auth_check(self, sender: Any) -> None:
-        if self.done:
-            return
-        try:
-            self.inspect_current_page()
-        except Exception:
-            self.finish_with_remaining_error(
-                "WEBVIEW_STATE_ERROR", "認証状態を再確認できませんでした。"
+        if not self.done:
+            self.dispatch_callback(
+                "AUTH_RETRY", lambda: self.inspect_current_page(self.race_token)
             )
 
     def load_current_race(self) -> None:
@@ -585,18 +654,19 @@ class WebViewRaceCollector:
         if race is None:
             self.finish()
             return
-
-        self.mode = "loading_race"
+        self.mode = self.LOAD_RACE
+        self.transition_pending = False
         self.auth_poll_scheduled = False
-        self.race_poll_token += 1
+        self.inspect_scheduled = False
+        self.race_token += 1
+        self.page_inspect_attempt = 0
         self.race_poll_attempt = 0
+        self.dom_ready_logged = False
         self.last_dom_result = None
         self.view.title_label.text = "出馬表を取得しています"
-        self.set_progress(
-            f"{self.current_index + 1} / {len(self.selected)} {race['raceName']}"
-        )
+        self.set_progress(f"{self.current_index + 1} / {len(self.selected)} {race['raceName']}")
+        self.log_event(f"LOAD {race['raceName']}")
         try:
-            # 認証Cookieは読まない。印表示モード用の既知Cookieだけを設定する。
             self.webview.eval_js(
                 "document.cookie='mark_mode=mark; path=/; max-age=31536000; "
                 "domain=.netkeiba.com'; 'ok';"
@@ -606,18 +676,15 @@ class WebViewRaceCollector:
             self.fail_current("WEBVIEW_LOAD_FAILED", "出馬表ページを開けませんでした。")
 
     def start_race_polling(self) -> None:
-        if self.done:
+        if self.done or self.mode == self.WAIT_DOM:
             return
-        if self.mode == "polling_race":
-            return
-        self.mode = "polling_race"
-        self.race_poll_token += 1
+        self.mode = self.WAIT_DOM
         self.race_poll_attempt = 0
-        token = self.race_poll_token
-        ui.delay(lambda: self.poll_current_race(token), 0.45)
+        token = self.race_token
+        self._schedule("WAIT_DOM", lambda: self.poll_current_race(token), 0.4, token)
 
     def poll_current_race(self, token: int) -> None:
-        if self.done or self.mode != "polling_race" or token != self.race_poll_token:
+        if self.done or self.mode != self.WAIT_DOM or token != self.race_token:
             return
         self.race_poll_attempt += 1
         data = self.evaluate_json(RACE_EXPORT_JS)
@@ -629,14 +696,17 @@ class WebViewRaceCollector:
                 int(data.get("horseNumberCount") or 0) == row_count
                 and int(data.get("horseNameCount") or 0) == row_count
             )
+            if controls_ready and rows_ready and not self.dom_ready_logged:
+                self.dom_ready_logged = True
+                self.log_event("DOM_READY")
             if controls_ready and rows_ready and data.get("horses"):
+                self.mode = self.EXTRACT
                 self.complete_current(data)
                 return
-
         if self.race_poll_attempt >= MAX_RACE_POLL_ATTEMPTS:
             self.fail_current_from_timeout(self.last_dom_result)
             return
-        ui.delay(lambda: self.poll_current_race(token), RACE_POLL_INTERVAL)
+        self._schedule("WAIT_DOM", lambda: self.poll_current_race(token), RACE_POLL_INTERVAL, token)
 
     def fail_current_from_timeout(self, data: Optional[Dict[str, Any]]) -> None:
         row_count = int(data.get("horseRowCount") or 0) if data else 0
@@ -659,7 +729,6 @@ class WebViewRaceCollector:
         if str(data.get("raceId") or "") != race["raceId"]:
             self.fail_current("RACE_ID_MISMATCH", "読み込んだ出馬表のraceIdが選択内容と一致しません。")
             return
-
         race_name = str(data.get("raceName") or "").strip()
         race_time = str(data.get("raceTime") or "").strip()
         if not race_name:
@@ -689,7 +758,6 @@ class WebViewRaceCollector:
                 self.fail_current("HORSE_NAME_NOT_FOUND", f"馬番{int(number)}の馬名を取得できませんでした。")
                 return
             horses.append({"horseId": horse_id, "number": int(number), "name": name, "mark": mark})
-
         if not horses:
             self.fail_current("NO_VALID_MARKS", "有効な印が1頭も設定されていません。")
             return
@@ -697,6 +765,8 @@ class WebViewRaceCollector:
             self.fail_current("DUPLICATE_HONMEI", "◎が2頭以上設定されています。")
             return
 
+        self.log_event("EXTRACT_OK")
+        self.mode = self.SAVE_RESULT
         self.races.append({
             "raceName": race_name,
             "raceTime": race_time,
@@ -706,29 +776,48 @@ class WebViewRaceCollector:
             "horses": horses,
             "rating": {"expectation": 0, "level": 0, "value": 0},
         })
+        self.log_event("SAVE_OK")
         self.advance_to_next_race()
 
     def fail_current(self, error_type: str, message: str) -> None:
+        if self.done or self.transition_pending or self.mode == self.NEXT_RACE:
+            return
         race = self.current_race
         if race is not None:
             self.errors.append(_race_error(race, error_type, message))
+            self.log_event(f"ERROR {error_type}")
         self.advance_to_next_race()
 
     def advance_to_next_race(self) -> None:
-        if self.done:
+        if self.done or self.transition_pending:
             return
+        self.transition_pending = True
+        self.mode = self.NEXT_RACE
         self.current_index += 1
-        self.race_poll_token += 1
+        self.race_token += 1
+        self.inspect_scheduled = False
         self.race_poll_attempt = 0
         self.last_dom_result = None
         if self.current_index >= len(self.selected):
             self.finish()
-        else:
-            ui.delay(self.load_current_race, 0.3)
+            return
+        token = self.race_token
+
+        def begin_next() -> None:
+            if self.mode != self.NEXT_RACE or token != self.race_token:
+                return
+            self.transition_pending = False
+            self.load_current_race()
+
+        self._schedule("NEXT_RACE", begin_next, 0.65, token)
 
     def finish_with_remaining_error(self, error_type: str, message: str) -> None:
+        if self.done:
+            return
+        existing_ids = {str(item.get("raceId") or "") for item in self.errors}
         for race in self.selected[self.current_index:]:
-            self.errors.append(_race_error(race, error_type, message))
+            if race["raceId"] not in existing_ids:
+                self.errors.append(_race_error(race, error_type, message))
         self.current_index = len(self.selected)
         self.finish()
 
@@ -736,7 +825,9 @@ class WebViewRaceCollector:
         if self.done:
             return
         self.done = True
-        self.mode = "done"
+        self.mode = self.COMPLETE
+        self.transition_pending = True
+        self.race_token += 1
         self.set_retry_visible(False)
         self.view.title_label.text = "取得が完了しました"
         self.set_progress(f"成功 {len(self.races)}件 / 失敗 {len(self.errors)}件")
@@ -745,11 +836,7 @@ class WebViewRaceCollector:
     def handle_view_closed(self) -> None:
         if self.done:
             return
-        error_type = (
-            "AUTHENTICATION_NOT_CONFIRMED"
-            if self.mode == "waiting_login"
-            else "USER_CANCELLED"
-        )
+        error_type = "AUTHENTICATION_NOT_CONFIRMED" if self.mode == self.WAIT_LOGIN else "USER_CANCELLED"
         message = (
             "netkeibaの認証状態を確認できませんでした。"
             if error_type == "AUTHENTICATION_NOT_CONFIRMED"
@@ -759,12 +846,13 @@ class WebViewRaceCollector:
             self.errors.append(_race_error(race, error_type, message))
         self.current_index = len(self.selected)
         self.done = True
-        self.mode = "done"
+        self.mode = self.COMPLETE
 
     def build_output(self) -> Dict[str, Any]:
         self.races.sort(key=lambda race: (race["raceTime"], race["raceId"]))
         return {
             "success": not self.errors and len(self.races) == len(self.selected),
+            "action": "collectSelectedRaces",
             "date": self.payload["date"],
             "races": self.races,
             "errors": self.errors,
