@@ -2,7 +2,9 @@
   "use strict";
 
   const STORAGE_KEY = "shinba-challenge-v2-settings";
-  const APP_ID = "shinba-challenge-v2";
+  const APP_ID = "shinba-challenge";
+  const PRODUCTION_ORIGIN = "https://10uver19.github.io";
+  const PRODUCTION_APP_URL = `${PRODUCTION_ORIGIN}/shinba-challenge/`;
   const DEFAULT_MEMO_TEMPLATE = [
     "{{dateSlash}} {{raceName}}",
     "印：{{mark}}",
@@ -11,7 +13,7 @@
     "配当妙味：{{valueStars}}"
   ].join("\n");
   const DEFAULTS = Object.freeze({
-    productionWebUrl: "",
+    productionWebUrl: PRODUCTION_APP_URL,
     pythonistaScriptPath: "shinba_challenge.py",
     memoTemplate: DEFAULT_MEMO_TEMPLATE,
     perfectRatingRainbow: true,
@@ -47,7 +49,7 @@
   function normalize(input) {
     const source = input && typeof input === "object" ? input : {};
     return {
-      productionWebUrl: normalizeHttpsUrl(source.productionWebUrl || ""),
+      productionWebUrl: normalizeHttpsUrl(source.productionWebUrl || DEFAULTS.productionWebUrl),
       pythonistaScriptPath: normalizeScriptPath(source.pythonistaScriptPath || DEFAULTS.pythonistaScriptPath),
       memoTemplate: String(source.memoTemplate || DEFAULTS.memoTemplate).slice(0, 2000),
       perfectRatingRainbow: source.perfectRatingRainbow !== false,
@@ -74,6 +76,7 @@
 
   function getCurrentReturnUrl() {
     const url = new URL(window.location.href);
+    if (url.origin === PRODUCTION_ORIGIN) return PRODUCTION_APP_URL;
     url.searchParams.delete("pythonistaResult");
     url.hash = "";
     return url.href;
@@ -85,6 +88,8 @@
 
   window.ShinbaConfig = {
     APP_ID,
+    PRODUCTION_ORIGIN,
+    PRODUCTION_APP_URL,
     STORAGE_KEY,
     DEFAULTS,
     DEFAULT_MEMO_TEMPLATE,

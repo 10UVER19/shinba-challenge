@@ -42,6 +42,7 @@
   let processedResultFingerprint = "";
   let pythonistaReturnNoticeShown = false;
   let awaitingNewcomerList = false;
+  let awaitingGenericPythonistaResult = false;
   let isNewcomerLaunching = false;
   let isNewcomerImporting = false;
   let newcomerAutomationMessage = null;
@@ -139,6 +140,7 @@
     selectionMessage = null;
     storyMeta = { date: todayIso(), memo: "" };
     awaitingNewcomerList = false;
+    awaitingGenericPythonistaResult = false;
     isNewcomerLaunching = false;
     isNewcomerImporting = false;
     newcomerAutomationMessage = null;
@@ -192,6 +194,7 @@
         : "home";
       awaitingPythonistaResult = saved.awaitingPythonistaResult === true && view === "raceBatch";
       awaitingNewcomerList = saved.awaitingNewcomerList === true && view === "home";
+      awaitingGenericPythonistaResult = saved.awaitingGenericPythonistaResult === true && awaitingNewcomerList;
       newcomerAutomationMessage = restoreUiMessage(saved.newcomerAutomationMessage);
       batchImportMessage = restoreUiMessage(saved.batchImportMessage);
       activeBatchRequest = saved.activeBatchRequest && typeof saved.activeBatchRequest === "object"
@@ -243,6 +246,7 @@
         selectedRaceKeys,
         selectedRaces,
         awaitingNewcomerList,
+        awaitingGenericPythonistaResult,
         newcomerAutomationMessage,
         awaitingPythonistaResult,
         batchImportMessage,
@@ -593,6 +597,7 @@
     newcomerRaces = importedList.races;
     updateSelectedRaces();
     awaitingNewcomerList = false;
+    awaitingGenericPythonistaResult = false;
     isNewcomerLaunching = false;
     isNewcomerImporting = false;
     newcomerAutomationMessage = null;
@@ -608,6 +613,7 @@
   async function startNewcomerListFlow() {
     if (isNewcomerLaunching || isNewcomerImporting || awaitingNewcomerList) return;
     prepareTodayFlow();
+    awaitingGenericPythonistaResult = false;
     isNewcomerLaunching = true;
     newcomerReturnNoticeShown = false;
     newcomerAutomationMessage = { type: "info", text: "Pythonistaで当日の新馬戦一覧を取得します…" };
@@ -674,7 +680,7 @@
       error.type = "INVALID_DATE";
       throw error;
     }
-    if (selectedRaces.length === 0) {
+    if (awaitingGenericPythonistaResult || selectedRaces.length === 0) {
       const recovered = payload.races.map((race, index) => {
         const identity = window.ShinbaImport.resolveRaceIdentity(race, { required: true });
         const raceName = String(race.raceName || "").trim();
@@ -708,11 +714,58 @@
     activeHistoryDate = date;
     isHistoricalSession = false;
     awaitingNewcomerList = false;
+    awaitingGenericPythonistaResult = false;
     isNewcomerImporting = false;
     newcomerAutomationMessage = null;
     view = "raceBatch";
     processPythonistaResultText(text);
     return true;
+  }
+
+  async function tryAutomaticPythonistaResultRead() {
+    if (!navigator.clipboard || !window.isSecureContext || typeof navigator.clipboard.readText !== "function") return false;
+    if (awaitingMemoSync || (!awaitingNewcomerList && !awaitingPythonistaResult)) return false;
+
+    try {
+      const clipboardText = String(await navigator.clipboard.readText() || "").trim();
+      if (!clipboardText) return false;
+      if (awaitingPythonistaResult) {
+        isBatchImporting = true;
+        batchImportMessage = { type: "info", text: "Pythonistaの取得結果を自動で読み込んでいます…" };
+        renderRaceBatch();
+        batchResultDraft = clipboardText;
+        isBatchImporting = false;
+        processPythonistaResultText(clipboardText);
+        return true;
+      }
+
+      isNewcomerImporting = true;
+      newcomerAutomationMessage = { type: "info", text: "Pythonistaの取得結果を自動で読み込んでいます…" };
+      renderHome();
+      if (recoverPythonistaRaceResult(clipboardText)) return true;
+      applyNewcomerList(window.ShinbaNewcomer.importNewcomerList(clipboardText));
+      return true;
+    } catch (error) {
+      isBatchImporting = false;
+      isNewcomerImporting = false;
+      console.debug("Pythonista結果の自動読込は利用できませんでした。1タップ読込を表示します。", error);
+      if (awaitingPythonistaResult) {
+        batchImportMessage = {
+          type: "info",
+          text: "Pythonistaから戻りました。「Pythonistaの取得結果を読み込む」を押してください。"
+        };
+        save();
+        renderRaceBatch();
+      } else if (awaitingNewcomerList) {
+        newcomerAutomationMessage = {
+          type: "info",
+          text: "Pythonistaから戻りました。下の取得結果読込ボタンを押してください。"
+        };
+        save();
+        renderHome();
+      }
+      return false;
+    }
   }
 
   function historyDateLabel(date) {
@@ -801,7 +854,7 @@
       ? `<div class="home-status is-${newcomerAutomationMessage.type}" role="${newcomerAutomationMessage.type === "error" ? "alert" : "status"}"><p>${escapeHtml(newcomerAutomationMessage.text)}</p>${messageDetailHtml(newcomerAutomationMessage)}</div>`
       : "";
     const primaryAction = awaitingNewcomerList
-      ? `<button id="read-newcomer-result-button" class="button button-primary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>${isNewcomerImporting ? "読み込んでいます…" : "新馬戦一覧の取得結果を読み込む"}</button>`
+      ? `<button id="read-newcomer-result-button" class="button button-primary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>${isNewcomerImporting ? "読み込んでいます…" : awaitingGenericPythonistaResult ? "Pythonistaの取得結果を読み込む" : "新馬戦一覧の取得結果を読み込む"}</button>`
       : `<button id="collect-newcomer-list-button" class="button button-primary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>${isNewcomerLaunching ? "Pythonistaを起動しています…" : "今日の新馬戦を開始"}</button>`;
     const workingAction = hasHistoryContent()
       ? `<button id="resume-working-session-button" class="button button-secondary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>作業中 ${escapeHtml(historyDateLabel(workingDate()))}　続きから</button>`
@@ -900,8 +953,8 @@
       <form id="settings-form" class="settings-panel">
         <div class="form-field">
           <label for="production-web-url">本番Web URL</label>
-          <input id="production-web-url" name="productionWebUrl" class="form-input" type="url" inputmode="url" value="${escapeHtml(appSettings.productionWebUrl)}" placeholder="https://example.github.io/shinba/">
-          <p class="field-help">ホーム画面ショートカットで開くURLの控えです。Pythonistaへの復帰URLには常に現在表示中のURLを使用します。</p>
+          <input id="production-web-url" name="productionWebUrl" class="form-input" type="url" inputmode="url" value="${escapeHtml(appSettings.productionWebUrl)}" placeholder="https://10uver19.github.io/shinba-challenge/">
+          <p class="field-help">本番公開URLの控えです。Pythonistaへの復帰URLは現在の実行環境から安全に生成します。</p>
         </div>
         <div class="form-field">
           <label for="pythonista-script-path">Pythonista script path</label>
@@ -1859,6 +1912,7 @@
     restore();
     if (returnedFromPythonista && awaitingNewcomerList) {
       view = "home";
+      awaitingGenericPythonistaResult = false;
       isNewcomerLaunching = false;
       newcomerReturnNoticeShown = true;
       newcomerAutomationMessage = {
@@ -1876,6 +1930,16 @@
     } else if (returnedFromPythonista && awaitingMemoSync) {
       view = "memoSync";
       memoSyncMessage = { type: "info", text: "Pythonistaから戻りました。「同期結果を読み込む」を押してください。" };
+    } else if (returnedFromPythonista) {
+      view = "home";
+      awaitingNewcomerList = true;
+      awaitingGenericPythonistaResult = true;
+      isNewcomerLaunching = false;
+      newcomerReturnNoticeShown = true;
+      newcomerAutomationMessage = {
+        type: "info",
+        text: "Pythonistaから戻りました。「Pythonistaの取得結果を読み込む」を押してください。"
+      };
     }
 
     try {
@@ -1895,6 +1959,7 @@
 
     save();
     renderCurrentView();
+    if (returnedFromPythonista) void tryAutomaticPythonistaResultRead();
   }
 
   function updateNetworkStatus() {

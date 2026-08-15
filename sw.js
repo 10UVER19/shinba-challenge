@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "shinba-challenge-v2-integrated-3";
+const CACHE_NAME = "shinba-challenge-v2-integrated-4";
 const APP_SHELL = [
   "./",
   "./index.html",
