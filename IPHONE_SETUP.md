@@ -8,6 +8,8 @@ Safariのお気に入りから本番URLを直接開いても利用できます�
 
 通常運用ではホーム画面のPWAアイコンまたはSafariの本番URLから開始し、Webアプリが必要なときだけPythonistaを起動します。requestには `appId: "shinba-challenge"` と本番 `returnUrl` が入り、処理後は `?pythonistaResult=1` を付けたGitHub Pagesへ復帰します。
 
+「今日の新馬戦を開始」ではWebアプリがローカル日付を`YYYY-MM-DD`で渡します。Pythonistaの`netkeiba_newcomer_client.py`がnetkeibaを直接開き、開催場ナビ解析・全開催場巡回・新馬戦抽出まで行うため、netkeibaページを先に開く操作や一覧取得ショートカットは不要です。
+
 復帰直後のClipboard API自動読込がiOSに拒否された場合は、画面の「Pythonistaの取得結果を読み込む」を1回押します。通常運用でJSONの手動貼り付けは不要です。
 
 PWAとして使う場合は本番URLをSafariで開き、共有 →「ホーム画面に追加」を実行します。この場合はホーム画面のPWAアイコンだけでも開始できます。

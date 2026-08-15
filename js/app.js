@@ -622,7 +622,10 @@
     renderHome();
 
     try {
-      await copyText(JSON.stringify(withReturnContext({ action: "collectNewcomerList" })));
+      await copyText(JSON.stringify(withReturnContext({
+        action: "collectNewcomerList",
+        date: todayIso()
+      })));
       awaitingNewcomerList = true;
       isNewcomerLaunching = false;
       newcomerAutomationMessage = {

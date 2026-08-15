@@ -77,7 +77,7 @@
       return normalized;
     }).sort((a, b) => a.raceTime.localeCompare(b.raceTime) || a.raceId.localeCompare(b.raceId));
 
-    return { date: normalizedDate, selectedRaces: races };
+    return { action: "collectSelectedRaces", date: normalizedDate, selectedRaces: races };
   }
 
   function normalizeFailure(source, fallbackRace) {
