@@ -4,6 +4,11 @@
   const STORAGE_KEY = "shinba-challenge-step1-v1";
   const STORAGE_SCHEMA_VERSION = 1;
   const PYTHONISTA_RETURN_PARAMETER = "pythonistaResult";
+  const PYTHONISTA_ACTIONS = Object.freeze({
+    newcomerList: "collectNewcomerList",
+    selectedRaces: "collectSelectedRaces",
+    horseMemos: "syncHorseMemos"
+  });
   const app = document.getElementById("app");
   const networkStatus = document.getElementById("network-status");
   const dialog = document.getElementById("zero-rating-dialog");
@@ -419,6 +424,36 @@
     return navigator.clipboard.readText();
   }
 
+  function parsePythonistaResultEnvelope(text) {
+    let payload;
+    try {
+      payload = JSON.parse(String(text || "").trim());
+    } catch (error) {
+      const invalid = new Error("Pythonista結果のJSON形式が正しくありません。");
+      invalid.type = "INVALID_JSON";
+      throw invalid;
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      const invalid = new Error("Pythonista結果のJSONオブジェクトを指定してください。");
+      invalid.type = "INVALID_PAYLOAD";
+      throw invalid;
+    }
+    const action = String(payload.action || "").trim();
+    if (!Object.values(PYTHONISTA_ACTIONS).includes(action)) {
+      const invalid = new Error("Pythonista結果のactionを確認できません。もう一度Webアプリから処理を開始してください。");
+      invalid.type = "UNSUPPORTED_ACTION";
+      throw invalid;
+    }
+    return { action, payload };
+  }
+
+  function assertExpectedPythonistaAction(action, expected) {
+    if (action === expected || awaitingGenericPythonistaResult) return;
+    const invalid = new Error(`待機中の処理（${expected}）と取得結果（${action}）が一致しません。`);
+    invalid.type = "PYTHONISTA_ACTION_MISMATCH";
+    throw invalid;
+  }
+
   function fingerprintText(text) {
     const source = String(text || "").trim();
     let hash = 2166136261;
@@ -623,7 +658,7 @@
 
     try {
       await copyText(JSON.stringify(withReturnContext({
-        action: "collectNewcomerList",
+        action: PYTHONISTA_ACTIONS.newcomerList,
         date: todayIso()
       })));
       awaitingNewcomerList = true;
@@ -651,8 +686,21 @@
     renderHome();
     try {
       const clipboardText = await readClipboardText();
-      if (recoverPythonistaRaceResult(clipboardText)) return;
-      const importedList = window.ShinbaNewcomer.importNewcomerList(clipboardText);
+      const envelope = parsePythonistaResultEnvelope(clipboardText);
+      if (envelope.action === PYTHONISTA_ACTIONS.selectedRaces) {
+        assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.newcomerList);
+        if (recoverPythonistaRaceResult(clipboardText)) return;
+      }
+      if (envelope.action === PYTHONISTA_ACTIONS.horseMemos) {
+        assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.newcomerList);
+        await applyMemoSyncResult(envelope.payload);
+        view = "memoSync";
+        isNewcomerImporting = false;
+        renderMemoSync();
+        return;
+      }
+      assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.newcomerList);
+      const importedList = window.ShinbaNewcomer.importNewcomerList(envelope.payload);
       applyNewcomerList(importedList);
     } catch (error) {
       isNewcomerImporting = false;
@@ -727,12 +775,17 @@
 
   async function tryAutomaticPythonistaResultRead() {
     if (!navigator.clipboard || !window.isSecureContext || typeof navigator.clipboard.readText !== "function") return false;
-    if (awaitingMemoSync || (!awaitingNewcomerList && !awaitingPythonistaResult)) return false;
+    if (!awaitingMemoSync && !awaitingNewcomerList && !awaitingPythonistaResult) return false;
 
     try {
       const clipboardText = String(await navigator.clipboard.readText() || "").trim();
       if (!clipboardText) return false;
-      if (awaitingPythonistaResult) {
+      const envelope = parsePythonistaResultEnvelope(clipboardText);
+      if (envelope.action === PYTHONISTA_ACTIONS.selectedRaces) {
+        assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.selectedRaces);
+        if (awaitingGenericPythonistaResult || selectedRaces.length === 0) {
+          return recoverPythonistaRaceResult(clipboardText);
+        }
         isBatchImporting = true;
         batchImportMessage = { type: "info", text: "Pythonistaの取得結果を自動で読み込んでいます…" };
         renderRaceBatch();
@@ -742,17 +795,37 @@
         return true;
       }
 
+      if (envelope.action === PYTHONISTA_ACTIONS.horseMemos) {
+        assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.horseMemos);
+        isMemoSyncBusy = true;
+        memoSyncMessage = { type: "info", text: "同期結果を自動で読み込んでいます…" };
+        view = "memoSync";
+        renderMemoSync();
+        await applyMemoSyncResult(envelope.payload);
+        isMemoSyncBusy = false;
+        renderMemoSync();
+        return true;
+      }
+
+      assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.newcomerList);
       isNewcomerImporting = true;
       newcomerAutomationMessage = { type: "info", text: "Pythonistaの取得結果を自動で読み込んでいます…" };
       renderHome();
-      if (recoverPythonistaRaceResult(clipboardText)) return true;
-      applyNewcomerList(window.ShinbaNewcomer.importNewcomerList(clipboardText));
+      applyNewcomerList(window.ShinbaNewcomer.importNewcomerList(envelope.payload));
       return true;
     } catch (error) {
       isBatchImporting = false;
       isNewcomerImporting = false;
+      isMemoSyncBusy = false;
       console.debug("Pythonista結果の自動読込は利用できませんでした。1タップ読込を表示します。", error);
-      if (awaitingPythonistaResult) {
+      if (awaitingMemoSync) {
+        memoSyncMessage = {
+          type: "info",
+          text: "Pythonistaから戻りました。「同期結果を読み込む」を押してください。"
+        };
+        save();
+        renderMemoSync();
+      } else if (awaitingPythonistaResult) {
         batchImportMessage = {
           type: "info",
           text: "Pythonistaから戻りました。「Pythonistaの取得結果を読み込む」を押してください。"
@@ -1314,6 +1387,8 @@
     renderRaceBatch();
     try {
       const clipboardText = await readClipboardText();
+      const envelope = parsePythonistaResultEnvelope(clipboardText);
+      assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.selectedRaces);
       batchResultDraft = clipboardText;
       isBatchImporting = false;
       processPythonistaResultText(clipboardText);
@@ -1612,32 +1687,44 @@
     }
   }
 
+  async function applyMemoSyncResult(resultInput) {
+    if (!activeHistoryRecord) {
+      const missing = new Error("馬メモ同期結果を反映する履歴がありません。");
+      missing.type = "MEMO_CONTEXT_MISSING";
+      throw missing;
+    }
+    const result = window.ShinbaMemoSync.validateResult(resultInput);
+    const updated = window.ShinbaMemoSync.applyResult(activeHistoryRecord, result);
+    activeHistoryRecord = await window.ShinbaHistoryStore.putHistory(updated);
+    const working = window.ShinbaHistoryModel.toWorkingState(activeHistoryRecord);
+    importedRaceSources = working.sources;
+    races.forEach((race, index) => {
+      race.betPlan = working.sources[index] && working.sources[index].betPlan || null;
+      race.marks.forEach((mark) => {
+        const sourceHorse = working.sources[index] && working.sources[index].horses.find((horse) => horse.number === mark.number);
+        if (sourceHorse) mark.netkeibaMemoSync = sourceHorse.netkeibaMemoSync;
+      });
+    });
+    awaitingMemoSync = false;
+    memoSyncRequest = null;
+    const failures = result.items.filter((item) => item.status !== "synced").length;
+    memoSyncMessage = failures
+      ? { type: "error", text: `${result.items.length - failures}頭同期成功 / ${failures}頭失敗。成功分は保存しました。` }
+      : { type: "success", text: `${result.items.length}頭の馬メモを同期しました。` };
+    await refreshHistoryRecords();
+    save();
+  }
+
   async function readMemoSyncResult() {
     if (isMemoSyncBusy || !activeHistoryRecord) return;
     isMemoSyncBusy = true;
     memoSyncMessage = { type: "info", text: "同期結果を読み込んでいます…" };
     renderMemoSync();
     try {
-      const result = window.ShinbaMemoSync.validateResult(await readClipboardText());
-      const updated = window.ShinbaMemoSync.applyResult(activeHistoryRecord, result);
-      activeHistoryRecord = await window.ShinbaHistoryStore.putHistory(updated);
-      const working = window.ShinbaHistoryModel.toWorkingState(activeHistoryRecord);
-      importedRaceSources = working.sources;
-      races.forEach((race, index) => {
-        race.betPlan = working.sources[index] && working.sources[index].betPlan || null;
-        race.marks.forEach((mark) => {
-          const sourceHorse = working.sources[index] && working.sources[index].horses.find((horse) => horse.number === mark.number);
-          if (sourceHorse) mark.netkeibaMemoSync = sourceHorse.netkeibaMemoSync;
-        });
-      });
-      awaitingMemoSync = false;
-      memoSyncRequest = null;
-      const failures = result.items.filter((item) => item.status !== "synced").length;
-      memoSyncMessage = failures
-        ? { type: "error", text: `${result.items.length - failures}頭同期成功 / ${failures}頭失敗。成功分は保存しました。` }
-        : { type: "success", text: `${result.items.length}頭の馬メモを同期しました。` };
-      await refreshHistoryRecords();
-      save();
+      const clipboardText = await readClipboardText();
+      const envelope = parsePythonistaResultEnvelope(clipboardText);
+      assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.horseMemos);
+      await applyMemoSyncResult(envelope.payload);
     } catch (error) {
       memoSyncMessage = createUiError("馬メモ同期結果を読み込めませんでした。", error);
     } finally {

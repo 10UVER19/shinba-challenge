@@ -95,6 +95,9 @@
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       throw new RaceBatchError("INVALID_PAYLOAD", "Pythonista取得結果のJSONオブジェクトを指定してください。");
     }
+    if (payload.action && payload.action !== "collectSelectedRaces") {
+      throw new RaceBatchError("ACTION_MISMATCH", "選択レース取得の結果ではありません。");
+    }
     if (Object.prototype.hasOwnProperty.call(payload, "selectedRaces")) {
       throw new RaceBatchError(
         "PYTHONISTA_RESULT_NOT_READY",

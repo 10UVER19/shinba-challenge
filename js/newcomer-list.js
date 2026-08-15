@@ -26,6 +26,9 @@
       const sourceError = payload.error || {};
       throw new NewcomerListError(sourceError.type || "EXPORT_ERROR", sourceError.message || "新馬戦一覧の取得に失敗しました。", sourceError.details);
     }
+    if (payload.action && payload.action !== "collectNewcomerList") {
+      throw new NewcomerListError("ACTION_MISMATCH", "新馬戦一覧取得の結果ではありません。");
+    }
     return payload.success === true && payload.data ? payload.data : payload;
   }
 
