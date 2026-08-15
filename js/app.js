@@ -715,6 +715,27 @@
     }
   }
 
+  async function tryAutomaticShortcutListRead() {
+    if (view !== "home" || isNewcomerImporting || isNewcomerLaunching) return false;
+    if (!navigator.clipboard || !window.isSecureContext || typeof navigator.clipboard.readText !== "function") return false;
+
+    try {
+      const clipboardText = String(await navigator.clipboard.readText() || "").trim();
+      if (!clipboardText) return false;
+      const envelope = parsePythonistaResultEnvelope(clipboardText);
+      if (envelope.action !== PYTHONISTA_ACTIONS.newcomerList) return false;
+      const importedList = window.ShinbaNewcomer.importNewcomerList(envelope.payload);
+      prepareTodayFlow();
+      isNewcomerImporting = true;
+      applyNewcomerList(importedList);
+      return true;
+    } catch (error) {
+      isNewcomerImporting = false;
+      console.debug("新馬戦一覧の自動読込は利用できませんでした。1タップ読込を表示します。", error);
+      return false;
+    }
+  }
+
   function recoverPythonistaRaceResult(text) {
     let payload;
     try {
@@ -931,7 +952,9 @@
     const status = newcomerAutomationMessage
       ? `<div class="home-status is-${newcomerAutomationMessage.type}" role="${newcomerAutomationMessage.type === "error" ? "alert" : "status"}"><p>${escapeHtml(newcomerAutomationMessage.text)}</p>${messageDetailHtml(newcomerAutomationMessage)}</div>`
       : "";
-    const primaryAction = `<button id="read-newcomer-result-button" class="button button-primary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>${isNewcomerImporting ? "読み込んでいます…" : awaitingGenericPythonistaResult ? "Pythonistaの取得結果を読み込む" : "新馬戦一覧の取得結果を読み込む"}</button>`;
+    const primaryAction = isNewcomerImporting
+      ? ""
+      : `<button id="read-newcomer-result-button" class="button button-primary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>${awaitingGenericPythonistaResult ? "Pythonistaの取得結果を読み込む" : "新馬戦一覧の取得結果を読み込む"}</button>`;
     const workingAction = hasHistoryContent()
       ? `<button id="resume-working-session-button" class="button button-secondary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>作業中 ${escapeHtml(historyDateLabel(workingDate()))}　続きから</button>`
       : "";
@@ -1467,7 +1490,9 @@
       : "";
     const effectiveMessage = batchImportMessage || (awaitingPythonistaResult ? {
       type: "info",
-      text: "Pythonistaの取得完了を待っています。Safariへ戻ったら結果読込ボタンを押してください。"
+      text: isBatchImporting
+        ? "Pythonistaの取得結果を自動で読み込んでいます…"
+        : "Pythonistaで出馬表を取得しています。完了後はSafariへ自動で戻ります。"
     } : null);
     const message = effectiveMessage
       ? `<div class="batch-message is-${effectiveMessage.type}" role="${effectiveMessage.type === "error" ? "alert" : "status"}"><p>${escapeHtml(effectiveMessage.text)}</p>${messageDetailHtml(effectiveMessage)}${errorList}</div>`
@@ -1476,6 +1501,19 @@
     const missingRaces = getMissingSelectedRaces();
     const hasPartialResult = Boolean(processedResultFingerprint) && missingRaces.length > 0;
     const controlsDisabled = isBatchImporting || isPythonistaLaunching;
+    const manualReadRequired = awaitingPythonistaResult
+      && pythonistaReturnNoticeShown
+      && !isBatchImporting
+      && !isPythonistaLaunching;
+    const automationPanel = manualReadRequired
+      ? `<section class="batch-panel batch-automation-panel" aria-labelledby="batch-automation-title">
+          <h3 id="batch-automation-title">取得結果</h3>
+          <p class="batch-description">自動読込が許可されませんでした。下のボタンを1回押してください。</p>
+          <div class="batch-automation-actions">
+            <button id="read-pythonista-result-button" class="button button-primary" type="button">Pythonistaの取得結果を読み込む</button>
+          </div>
+        </section>`
+      : "";
     const partialActions = hasPartialResult
       ? `<section class="batch-panel" aria-labelledby="batch-partial-title">
           <h3 id="batch-partial-title">部分取得結果</h3>
@@ -1496,13 +1534,7 @@
         <h3 id="batch-progress-title">対象レース</h3>
         <ul class="batch-progress-list" aria-live="polite">${progressRows}</ul>
       </section>
-      <section class="batch-panel batch-automation-panel" aria-labelledby="batch-automation-title">
-        <h3 id="batch-automation-title">Pythonista連携</h3>
-        <p class="batch-description">Safariへ戻ったら、下のボタンを1回押して取得結果を読み込みます。</p>
-        <div class="batch-automation-actions">
-          <button id="read-pythonista-result-button" class="button button-primary" type="button"${controlsDisabled ? " disabled" : ""}>${isBatchImporting ? "読み込んでいます…" : "Pythonistaの取得結果を読み込む"}</button>
-        </div>
-      </section>
+      ${automationPanel}
       <details class="trouble-panel"${batchImportMessage && batchImportMessage.type === "error" ? " open" : ""}>
         <summary>詳細 / トラブル時</summary>
         <div class="trouble-panel-body">
@@ -1531,7 +1563,7 @@
 
     const resultTextarea = document.getElementById("batch-result-json");
     resultTextarea.addEventListener("input", () => { batchResultDraft = resultTextarea.value; });
-    document.getElementById("read-pythonista-result-button").addEventListener("click", readPythonistaResultFromClipboard);
+    document.getElementById("read-pythonista-result-button")?.addEventListener("click", readPythonistaResultFromClipboard);
     document.getElementById("copy-and-open-pythonista-button").addEventListener("click", () => copyRequestAndOpenPythonista(request));
     document.getElementById("open-pythonista-button").addEventListener("click", openPythonista);
     document.getElementById("import-batch-result-button").addEventListener("click", () => {
@@ -1948,7 +1980,7 @@
     }
   });
 
-  function handlePotentialPythonistaReturn() {
+  async function handlePotentialPythonistaReturn() {
     if (document.visibilityState === "hidden") return;
     if (view === "memoSync" && awaitingMemoSync) {
       if (memoSyncMessage && memoSyncMessage.type === "info" && memoSyncMessage.text.includes("戻りました")) return;
@@ -1961,6 +1993,10 @@
       if (newcomerReturnNoticeShown) return;
       isNewcomerLaunching = false;
       newcomerReturnNoticeShown = true;
+      newcomerAutomationMessage = { type: "info", text: "取得結果を自動で読み込んでいます…" };
+      save();
+      if (await tryAutomaticPythonistaResultRead()) return;
+      if (!awaitingNewcomerList) return;
       newcomerAutomationMessage = {
         type: "info",
         text: "Pythonistaから戻りました。「新馬戦一覧の取得結果を読み込む」を押してください。"
@@ -1973,6 +2009,10 @@
     if (pythonistaReturnNoticeShown) return;
     isPythonistaLaunching = false;
     pythonistaReturnNoticeShown = true;
+    batchImportMessage = { type: "info", text: "Pythonistaの取得結果を自動で読み込んでいます…" };
+    save();
+    if (await tryAutomaticPythonistaResultRead()) return;
+    if (!awaitingPythonistaResult) return;
     batchImportMessage = {
       type: "info",
       text: "Pythonistaから戻りました。「Pythonistaの取得結果を読み込む」を押してください。"
@@ -2006,14 +2046,14 @@
       newcomerReturnNoticeShown = true;
       newcomerAutomationMessage = {
         type: "info",
-        text: "Pythonistaから戻りました。「新馬戦一覧の取得結果を読み込む」を押してください。"
+        text: "取得結果を自動で読み込んでいます…"
       };
     } else if (returnedFromPythonista && awaitingPythonistaResult) {
       view = "raceBatch";
       isPythonistaLaunching = false;
       batchImportMessage = {
         type: "info",
-        text: "Pythonistaから戻りました。「Pythonistaの取得結果を読み込む」を押してください。"
+        text: "Pythonistaの取得結果を自動で読み込んでいます…"
       };
       pythonistaReturnNoticeShown = true;
     } else if (returnedFromPythonista && awaitingMemoSync) {
@@ -2027,7 +2067,7 @@
       newcomerReturnNoticeShown = true;
       newcomerAutomationMessage = {
         type: "info",
-        text: "Pythonistaから戻りました。「Pythonistaの取得結果を読み込む」を押してください。"
+        text: "Pythonistaの取得結果を自動で読み込んでいます…"
       };
     }
 
@@ -2047,8 +2087,34 @@
     }
 
     save();
+
+    const shouldReadPythonistaResult = returnedFromPythonista
+      || awaitingPythonistaResult
+      || awaitingNewcomerList
+      || awaitingMemoSync;
+    if (shouldReadPythonistaResult) {
+      if (awaitingPythonistaResult) pythonistaReturnNoticeShown = true;
+      if (awaitingNewcomerList) newcomerReturnNoticeShown = true;
+      if (await tryAutomaticPythonistaResultRead()) return;
+
+      if (awaitingPythonistaResult) {
+        batchImportMessage = {
+          type: "info",
+          text: "自動読込が許可されませんでした。「Pythonistaの取得結果を読み込む」を押してください。"
+        };
+      } else if (awaitingNewcomerList) {
+        newcomerAutomationMessage = {
+          type: "info",
+          text: "自動読込が許可されませんでした。下の取得結果読込ボタンを押してください。"
+        };
+      }
+      save();
+      renderCurrentView();
+      return;
+    }
+
+    if (view === "home" && await tryAutomaticShortcutListRead()) return;
     renderCurrentView();
-    if (returnedFromPythonista) void tryAutomaticPythonistaResultRead();
   }
 
   function updateNetworkStatus() {
