@@ -438,7 +438,40 @@
       invalid.type = "INVALID_PAYLOAD";
       throw invalid;
     }
-    const action = String(payload.action || "").trim();
+    let action = String(payload.action || "").trim();
+    if (!action) {
+      const dateIsValid = /^\d{4}-\d{2}-\d{2}$/.test(String(payload.date || "").trim());
+      const races = Array.isArray(payload.races) ? payload.races : null;
+      const rowsHaveIdentity = races && races.every((race) => (
+        race
+        && typeof race === "object"
+        && /^\d{12}$/.test(String(race.raceId || "").trim())
+        && String(race.raceName || "").trim()
+        && /^([01]?\d|2[0-3]):[0-5]\d$/.test(String(race.raceTime || "").trim())
+      ));
+      const isSelectedRaceResult = (
+        typeof payload.success === "boolean"
+        && dateIsValid
+        && races
+        && Array.isArray(payload.errors)
+        && (
+          (races.length > 0 && rowsHaveIdentity && races.every((race) => Array.isArray(race.horses)))
+          || (races.length === 0 && awaitingPythonistaResult)
+        )
+      );
+      const isNewcomerListResult = (
+        payload.success === true
+        && dateIsValid
+        && races
+        && rowsHaveIdentity
+        && races.every((race) => !Object.prototype.hasOwnProperty.call(race, "horses"))
+        && !(races.length === 0 && Array.isArray(payload.errors))
+      );
+      const isMemoResult = dateIsValid && Array.isArray(payload.items);
+      if (isSelectedRaceResult) action = PYTHONISTA_ACTIONS.selectedRaces;
+      else if (isNewcomerListResult) action = PYTHONISTA_ACTIONS.newcomerList;
+      else if (isMemoResult) action = PYTHONISTA_ACTIONS.horseMemos;
+    }
     if (!Object.values(PYTHONISTA_ACTIONS).includes(action)) {
       const invalid = new Error("Pythonista結果のactionを確認できません。もう一度Webアプリから処理を開始してください。");
       invalid.type = "UNSUPPORTED_ACTION";
@@ -645,42 +678,11 @@
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  async function startNewcomerListFlow() {
-    if (isNewcomerLaunching || isNewcomerImporting || awaitingNewcomerList) return;
-    prepareTodayFlow();
-    awaitingGenericPythonistaResult = false;
-    isNewcomerLaunching = true;
-    newcomerReturnNoticeShown = false;
-    newcomerAutomationMessage = { type: "info", text: "Pythonistaで当日の新馬戦一覧を取得します…" };
-    view = "home";
-    save();
-    renderHome();
-
-    try {
-      await copyText(JSON.stringify(withReturnContext({
-        action: PYTHONISTA_ACTIONS.newcomerList,
-        date: todayIso()
-      })));
-      awaitingNewcomerList = true;
-      isNewcomerLaunching = false;
-      newcomerAutomationMessage = {
-        type: "info",
-        text: "Pythonistaを起動しました。完了後、自動的にSafariへ戻ります。"
-      };
-      save();
-      renderHome();
-      window.location.assign(pythonistaRunUrl());
-    } catch (error) {
-      isNewcomerLaunching = false;
-      awaitingNewcomerList = false;
-      newcomerAutomationMessage = createUiError("新馬戦一覧の取得を開始できませんでした。", error);
-      save();
-      renderHome();
-    }
-  }
-
   async function readNewcomerListFromClipboard() {
     if (isNewcomerImporting || isNewcomerLaunching) return;
+    prepareTodayFlow();
+    awaitingNewcomerList = true;
+    awaitingGenericPythonistaResult = false;
     isNewcomerImporting = true;
     newcomerAutomationMessage = { type: "info", text: "新馬戦一覧を読み込んでいます…" };
     renderHome();
@@ -917,7 +919,7 @@
       save();
       renderRaceSelection();
     } else {
-      startNewcomerListFlow();
+      readNewcomerListFromClipboard();
       return;
     }
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -929,9 +931,7 @@
     const status = newcomerAutomationMessage
       ? `<div class="home-status is-${newcomerAutomationMessage.type}" role="${newcomerAutomationMessage.type === "error" ? "alert" : "status"}"><p>${escapeHtml(newcomerAutomationMessage.text)}</p>${messageDetailHtml(newcomerAutomationMessage)}</div>`
       : "";
-    const primaryAction = awaitingNewcomerList
-      ? `<button id="read-newcomer-result-button" class="button button-primary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>${isNewcomerImporting ? "読み込んでいます…" : awaitingGenericPythonistaResult ? "Pythonistaの取得結果を読み込む" : "新馬戦一覧の取得結果を読み込む"}</button>`
-      : `<button id="collect-newcomer-list-button" class="button button-primary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>${isNewcomerLaunching ? "Pythonistaを起動しています…" : "今日の新馬戦を開始"}</button>`;
+    const primaryAction = `<button id="read-newcomer-result-button" class="button button-primary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>${isNewcomerImporting ? "読み込んでいます…" : awaitingGenericPythonistaResult ? "Pythonistaの取得結果を読み込む" : "新馬戦一覧の取得結果を読み込む"}</button>`;
     const workingAction = hasHistoryContent()
       ? `<button id="resume-working-session-button" class="button button-secondary home-primary-button" type="button"${controlsDisabled ? " disabled" : ""}>作業中 ${escapeHtml(historyDateLabel(workingDate()))}　続きから</button>`
       : "";
@@ -954,11 +954,11 @@
       <section class="home-start" aria-labelledby="home-start-title">
         <p class="home-step">START</p>
         <h2 id="home-start-title">当日の新馬戦から作成</h2>
-        <p class="home-description">一覧取得からレース選択、評価、Story保存まで順番に進みます。</p>
+        <p class="home-description">ショートカットで取得した一覧を読み込み、レース選択、評価、Story保存へ進みます。</p>
         <div class="home-actions">${primaryAction}${workingAction}${savedListAction}</div>
         ${status}
         <ol class="home-flow" aria-label="通常利用の流れ">
-          <li>新馬戦一覧を取得</li>
+          <li>ショートカットの一覧を読み込む</li>
           <li>掲載レースを選択</li>
           <li>評価してPNG保存</li>
         </ol>
@@ -996,7 +996,6 @@
         </div>
       </details>`;
 
-    document.getElementById("collect-newcomer-list-button")?.addEventListener("click", startNewcomerListFlow);
     document.getElementById("resume-working-session-button")?.addEventListener("click", resumeWorkingSession);
     document.getElementById("read-newcomer-result-button")?.addEventListener("click", readNewcomerListFromClipboard);
     document.getElementById("resume-race-selection-button")?.addEventListener("click", () => {
