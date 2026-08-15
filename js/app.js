@@ -680,29 +680,19 @@
 
   async function readNewcomerListFromClipboard() {
     if (isNewcomerImporting || isNewcomerLaunching) return;
-    prepareTodayFlow();
-    awaitingNewcomerList = true;
-    awaitingGenericPythonistaResult = false;
     isNewcomerImporting = true;
     newcomerAutomationMessage = { type: "info", text: "新馬戦一覧を読み込んでいます…" };
     renderHome();
     try {
       const clipboardText = await readClipboardText();
       const envelope = parsePythonistaResultEnvelope(clipboardText);
-      if (envelope.action === PYTHONISTA_ACTIONS.selectedRaces) {
-        assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.newcomerList);
+      if (awaitingGenericPythonistaResult && envelope.action === PYTHONISTA_ACTIONS.selectedRaces) {
         if (recoverPythonistaRaceResult(clipboardText)) return;
-      }
-      if (envelope.action === PYTHONISTA_ACTIONS.horseMemos) {
-        assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.newcomerList);
-        await applyMemoSyncResult(envelope.payload);
-        view = "memoSync";
-        isNewcomerImporting = false;
-        renderMemoSync();
-        return;
       }
       assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.newcomerList);
       const importedList = window.ShinbaNewcomer.importNewcomerList(envelope.payload);
+      prepareTodayFlow();
+      isNewcomerImporting = true;
       applyNewcomerList(importedList);
     } catch (error) {
       isNewcomerImporting = false;
@@ -961,6 +951,9 @@
     const savedListAction = newcomerRaces.length > 0 && !awaitingNewcomerList
       ? `<button id="resume-race-selection-button" class="button button-secondary" type="button">保存した一覧を開く（${newcomerRaces.length}レース）</button>`
       : "";
+    const savedDataActions = workingAction || savedListAction
+      ? `<div class="home-actions">${workingAction}${savedListAction}</div>`
+      : "";
 
     const historyStatus = historyMessage
       ? `<div class="home-status is-${historyMessage.type}" role="${historyMessage.type === "error" ? "alert" : "status"}"><p>${escapeHtml(historyMessage.text)}</p>${messageDetailHtml(historyMessage)}</div>`
@@ -978,7 +971,7 @@
         <p class="home-step">START</p>
         <h2 id="home-start-title">当日の新馬戦から作成</h2>
         <p class="home-description">ショートカットで取得した一覧を読み込み、レース選択、評価、Story保存へ進みます。</p>
-        <div class="home-actions">${primaryAction}${workingAction}${savedListAction}</div>
+        <div class="home-actions">${primaryAction}</div>
         ${status}
         <ol class="home-flow" aria-label="通常利用の流れ">
           <li>ショートカットの一覧を読み込む</li>
@@ -986,28 +979,32 @@
           <li>評価してPNG保存</li>
         </ol>
       </section>
-      <section class="history-panel" aria-labelledby="history-title">
-        <div class="history-heading">
-          <div><p class="home-step">HISTORY</p><h2 id="history-title">過去の予想</h2></div>
-          <span class="history-total">${historyRecords.length}日分</span>
-        </div>
-        ${historyItems}
-        ${historyStatus}
-      </section>
-      <nav class="home-utility-actions" aria-label="アプリ管理">
-        <button id="open-settings-button" class="button button-secondary" type="button">設定</button>
-      </nav>
-      <details class="backup-panel">
-        <summary>履歴のバックアップ / 復元</summary>
+      <details class="backup-panel data-management-panel">
+        <summary>詳細 / データ管理</summary>
         <div class="backup-panel-body">
-          <p>全履歴をJSONで書き出します。復元時は先に形式を検証し、同じ日付だけを更新します。</p>
-          <div class="backup-actions">
-            <button id="export-history-button" class="button button-secondary button-small" type="button"${controlsDisabled ? " disabled" : ""}>バックアップを書き出す</button>
-            <label class="button button-secondary button-small backup-file-button${controlsDisabled ? " is-disabled" : ""}">
-              バックアップを読み込む
-              <input id="import-history-input" type="file" accept="application/json,.json"${controlsDisabled ? " disabled" : ""}>
-            </label>
-          </div>
+          ${savedDataActions}
+          <section class="history-panel" aria-labelledby="history-title">
+            <div class="history-heading">
+              <div><p class="home-step">HISTORY</p><h2 id="history-title">過去の予想</h2></div>
+              <span class="history-total">${historyRecords.length}日分</span>
+            </div>
+            ${historyItems}
+            ${historyStatus}
+          </section>
+          <nav class="home-utility-actions" aria-label="アプリ管理">
+            <button id="open-settings-button" class="button button-secondary" type="button">設定</button>
+          </nav>
+          <section aria-labelledby="backup-title">
+            <h3 id="backup-title">履歴のバックアップ / 復元</h3>
+            <p>全履歴をJSONで書き出します。復元時は先に形式を検証し、同じ日付だけを更新します。</p>
+            <div class="backup-actions">
+              <button id="export-history-button" class="button button-secondary button-small" type="button"${controlsDisabled ? " disabled" : ""}>バックアップを書き出す</button>
+              <label class="button button-secondary button-small backup-file-button${controlsDisabled ? " is-disabled" : ""}">
+                バックアップを読み込む
+                <input id="import-history-input" type="file" accept="application/json,.json"${controlsDisabled ? " disabled" : ""}>
+              </label>
+            </div>
+          </section>
         </div>
       </details>
       <details class="trouble-panel"${newcomerAutomationMessage && newcomerAutomationMessage.type === "error" ? " open" : ""}>
@@ -1402,28 +1399,46 @@
     renderRaceBatch();
   }
 
+  function importBatchResultDraft() {
+    const resultTextarea = document.getElementById("batch-result-json");
+    if (resultTextarea) batchResultDraft = resultTextarea.value;
+    if (!batchResultDraft.trim()) {
+      batchImportMessage = { type: "error", text: "Pythonistaの取得結果JSONを貼り付けてください。" };
+      renderRaceBatch();
+      return;
+    }
+    try {
+      processPythonistaResultText(batchResultDraft);
+    } catch (error) {
+      batchImportMessage = createUiError("貼り付けた取得結果を読み込めませんでした。", error);
+      save();
+      renderRaceBatch();
+    }
+  }
+
   async function readPythonistaResultFromClipboard() {
     if (isBatchImporting) return;
     isBatchImporting = true;
     batchImportMessage = { type: "info", text: "Pythonistaの取得結果を読み込んでいます…" };
     renderRaceBatch();
+    let clipboardText;
     try {
-      const clipboardText = await readClipboardText();
-      const envelope = parsePythonistaResultEnvelope(clipboardText);
-      assertExpectedPythonistaAction(envelope.action, PYTHONISTA_ACTIONS.selectedRaces);
-      batchResultDraft = clipboardText;
-      isBatchImporting = false;
-      processPythonistaResultText(clipboardText);
+      clipboardText = await readClipboardText();
     } catch (error) {
       isBatchImporting = false;
       batchImportMessage = createUiError(
-        "Pythonistaの取得結果を読み込めませんでした。もう一度試すか、トラブル時の入力欄を使用してください。",
+        "クリップボードを読み込めませんでした。詳細 / トラブル時から手動貼り付けしてください。",
         error
       );
       save();
       renderRaceBatch();
       return;
     }
+    batchResultDraft = String(clipboardText || "");
+    const resultTextarea = document.getElementById("batch-result-json");
+    if (resultTextarea) resultTextarea.value = batchResultDraft;
+    isBatchImporting = false;
+    importBatchResultDraft();
   }
 
   function retryMissingRaces() {
@@ -1566,21 +1581,7 @@
     document.getElementById("read-pythonista-result-button")?.addEventListener("click", readPythonistaResultFromClipboard);
     document.getElementById("copy-and-open-pythonista-button").addEventListener("click", () => copyRequestAndOpenPythonista(request));
     document.getElementById("open-pythonista-button").addEventListener("click", openPythonista);
-    document.getElementById("import-batch-result-button").addEventListener("click", () => {
-      batchResultDraft = resultTextarea.value;
-      if (!batchResultDraft.trim()) {
-        batchImportMessage = { type: "error", text: "Pythonistaの取得結果JSONを貼り付けてください。" };
-        renderRaceBatch();
-        return;
-      }
-      try {
-        processPythonistaResultText(batchResultDraft);
-      } catch (error) {
-        batchImportMessage = createUiError("貼り付けた取得結果を読み込めませんでした。", error);
-        save();
-        renderRaceBatch();
-      }
-    });
+    document.getElementById("import-batch-result-button").addEventListener("click", importBatchResultDraft);
     document.getElementById("continue-successful-races-button")?.addEventListener("click", applyCollectedRaces);
     document.getElementById("retry-failed-races-button")?.addEventListener("click", retryMissingRaces);
     document.getElementById("back-to-race-selection-button").addEventListener("click", () => {
