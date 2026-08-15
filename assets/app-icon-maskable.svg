@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="新馬戦チャレンジ">
+  <rect width="512" height="512" fill="#093494"/>
+  <circle cx="256" cy="256" r="174" fill="#fff" stroke="#d4af37" stroke-width="8"/>
+  <text x="256" y="242" text-anchor="middle" font-family="sans-serif" font-size="92" font-weight="800" fill="#093494">新馬</text>
+  <text x="256" y="330" text-anchor="middle" font-family="sans-serif" font-size="76" font-weight="800" fill="#093494">戦</text>
+</svg>
